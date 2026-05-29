@@ -1,4 +1,4 @@
-// ======  Proxy Controller  ======
+// ======  Proxy Controller (Bandwidth Optimized) ======
 
 export default {
   async fetch(request, env, ctx) {
@@ -11,9 +11,6 @@ export default {
     const PROXY_USER = env.PROXY_USER || "proxy";    
     const PROXY_PASS = env.PROXY_PASS || "888888";   
 
-    // ====================================================
-    // [基础防御] 浏览器与安全节点 Basic Auth 鉴权函数
-    // ====================================================
     const authenticate = (request) => {
       const authHeader = request.headers.get("Authorization");
       if (!authHeader) return false;
@@ -38,9 +35,6 @@ export default {
       });
     };
 
-    // ====================================================
-    // [1] 数据库建表 (D1)
-    // ====================================================
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS servers (
         ip TEXT PRIMARY KEY,
@@ -64,9 +58,6 @@ export default {
       )
     `).run();
 
-    // ====================================================
-    // [2] 动态分发：Proxy Server 引擎源码 
-    // ====================================================
     if (url.pathname === "/scripts/proxy_server.py") {
       const PROXY_CODE = `#!/usr/bin/env python3
 from __future__ import annotations
@@ -227,9 +218,6 @@ def start_proxy_server(host: str, port: int, bind_interface: str = "tun0") -> No
       return new Response(PROXY_CODE, { headers: { "Content-Type": "text/plain;charset=UTF-8" } });
     }
 
-    // ====================================================
-    // [3] 动态分发：Lite Manager 调度引擎源码
-    // ====================================================
     if (url.pathname === "/scripts/lite_manager.py") {
       const MANAGER_CODE = `#!/usr/bin/env python3
 import base64, csv, os, subprocess, threading, time, urllib.request, json
@@ -372,8 +360,21 @@ def harvest_snapshot_nodes() -> list:
             })
         return nodes
     except Exception as e: 
-        print(f"[-] 从 VPNGate 拉取瞬时快照失败: {e}", flush=True)
         return []
+
+# 【核心修复】：增加独立的数据拉取线程，解耦流量浪费
+def vpngate_fetch_loop():
+    global global_node_reservoir, dead_ips
+    while True:
+        snapshot = harvest_snapshot_nodes()
+        if snapshot:
+            with reservoir_lock:
+                for n in snapshot:
+                    if n["ip"] not in dead_ips:
+                        global_node_reservoir[n["ip"]] = n
+            print(f"[*] ⚡ 节点库已从云端低频更新，当前囤积有效节点 -> {len(global_node_reservoir)} 个", flush=True)
+        # 每 5 分钟 (300秒) 才请求一次外部 API，彻底解决宽带耗尽问题
+        time.sleep(300)
 
 def setup_routing():
     dev, table = "tun0", "100"
@@ -491,16 +492,11 @@ def maintain_pool():
             dead_ips.clear()
             last_blacklist_clear = time.time()
 
-        snapshot = harvest_snapshot_nodes()
         with reservoir_lock:
-            for n in snapshot:
-                if n["ip"] not in dead_ips:
-                    global_node_reservoir[n["ip"]] = n
             now = time.time()
             stale_ips = [ip for ip, node in global_node_reservoir.items() if now - node["harvested_at"] > 10800]
             for ip in stale_ips:
                 global_node_reservoir.pop(ip, None)
-            print(f"[*] ⚡ 蓄水池每5秒合并去重，当前囤积有效全球节点 -> {len(global_node_reservoir)} 个", flush=True)
 
         needs_dispatch = False
         with state_lock:
@@ -529,8 +525,9 @@ def maintain_pool():
                     threading.Thread(target=connect_node, args=(node,), daemon=True).start()
                     time.sleep(0.5)
                 else:
-                    print(f"[-] 蓄水池中暂无 [{target_country}] 可用。持续滚动等待...", flush=True)
+                    pass # 静默等待，避免刷屏
         
+        # 维持 5 秒的超高频本地健康检查
         time.sleep(5)
 
 def main():
@@ -551,6 +548,7 @@ def main():
     print(f"  Proxy Controller 引擎启动！(工作端口: {PROXY_PORT})", flush=True)
     print("========================================", flush=True)
 
+    threading.Thread(target=vpngate_fetch_loop, daemon=True).start()
     threading.Thread(target=update_config_loop, daemon=True).start()
 
     import proxy_server
@@ -566,9 +564,6 @@ if __name__ == "__main__":
       return new Response(MANAGER_CODE, { headers: { "Content-Type": "text/plain;charset=UTF-8" } });
     }
 
-    // ====================================================
-    // [4] 动态分发：VPS 一键安装脚本
-    // ====================================================
     if (url.pathname === "/agent") {
       const agentScript = `#!/usr/bin/env bash
 echo "=========================================================="
@@ -611,14 +606,11 @@ systemctl daemon-reload
 systemctl enable proxy-lite.service
 systemctl restart proxy-lite.service
 
-echo "[+] 引擎更新成功！全息日志和5秒超高频机制已加载。"
+echo "[+] 引擎更新成功！全息日志和无流量损耗调度机制已加载。"
 `;
       return new Response(agentScript, { headers: { "Content-Type": "text/plain;charset=UTF-8" } });
     }
 
-    // ====================================================
-    // [5] 云端代理接口，破解源站 CORS 限制并拉取原生评分数据
-    // ====================================================
     if (url.pathname.startsWith("/api/coffee-lookup/")) {
         if (!authenticate(request)) return unauthorizedResponse();
         const targetIp = url.pathname.replace("/api/coffee-lookup/", "");
@@ -626,7 +618,7 @@ echo "[+] 引擎更新成功！全息日志和5秒超高频机制已加载。"
             const reqUrl = `https://ip.net.coffee/api/ip/lookup/${targetIp}`;
             const resp = await fetch(reqUrl, {
                 headers: {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Accept": "application/json",
                     "Referer": "https://ip.net.coffee/"
                 }
@@ -634,10 +626,7 @@ echo "[+] 引擎更新成功！全息日志和5秒超高频机制已加载。"
             const data = await resp.text();
             return new Response(data, { 
                 status: resp.status,
-                headers: { 
-                    "Content-Type": "application/json",
-                    "Access-Control-Allow-Origin": "*"
-                } 
+                headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
             });
         } catch (err) {
             return new Response(JSON.stringify({ error: err.message }), { status: 500 });
@@ -646,7 +635,6 @@ echo "[+] 引擎更新成功！全息日志和5秒超高频机制已加载。"
 
     if (url.pathname === "/api/countries") {
         try {
-            // 获取 VPNGate 数据
             const response = await fetch("https://www.vpngate.net/api/iphone/");
             const text = await response.text();
             const lines = text.split('\n');
@@ -660,21 +648,14 @@ echo "[+] 引擎更新成功！全息日志和5秒超高频机制已加载。"
                     }
                 }
             }
-            
-            // 合并所有已知的国家代码
-            const predefinedCountries = ["US", "JP", "KR", "SG", "HK", "TW", "GB", "DE", "FR", "NL", "CA", "AU", "IN", "VN", "BR", "AE", "MY", "TH", "PH", "ID", "TR", "ZA", "IT", "ES", "RU", "CH", "SE", "PL", "SE", "NO", "DK", "FI", "IE", "AT", "NZ", "BE", "PT", "CZ", "GR", "HU", "RO", "BG", "HR", "SK", "SI", "LT", "LV", "EE", "EE", "UA", "RS", "BA", "SI", "CY", "MT", "IS", "LU", "IS", "CY"];
-            
+            const predefinedCountries = ["US", "JP", "KR", "SG", "HK", "TW", "GB", "DE", "FR", "NL", "CA", "AU", "IN", "VN", "BR", "AE", "MY", "TH", "PH", "ID", "TR", "ZA", "IT", "ES", "RU", "CH", "SE", "PL", "NO", "DK", "FI", "IE", "AT", "NZ", "BE", "PT", "CZ", "GR", "HU", "RO", "BG", "HR", "SK", "SI", "LT", "LV", "EE", "UA", "RS", "BA", "CY", "MT", "IS", "LU"];
             const allCountries = new Set([...predefinedCountries, ...Array.from(dynamicCountries)]);
             return new Response(JSON.stringify(Array.from(allCountries).sort()), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
         } catch(err) {
-            const fallback = ["US", "JP", "KR", "SG", "HK", "TW", "GB", "DE", "FR", "NL", "CA", "AU", "IN", "VN", "BR", "AE", "MY", "TH", "PH", "ID"];
-            return new Response(JSON.stringify(fallback), { headers: { "Content-Type": "application/json" } }); 
+            return new Response(JSON.stringify(["US", "JP", "KR", "SG", "HK", "TW"]), { headers: { "Content-Type": "application/json" } }); 
         }
     }
 
-    // ====================================================
-    // [6] 安全敏感接口拦截区
-    // ====================================================
     if (url.pathname === "/" || url.pathname === "/api/config" || url.pathname === "/api/nodes" || url.pathname === "/api/proxies" || url.pathname === "/api/report") {
       if (!authenticate(request)) return unauthorizedResponse();
     }
@@ -682,7 +663,6 @@ echo "[+] 引擎更新成功！全息日志和5秒超高频机制已加载。"
     if (url.pathname === "/api/config" && request.method === "GET") {
         const { results } = await env.DB.prepare(`SELECT value FROM global_config WHERE key = 'slot_map'`).all();
         if (results && results.length > 0) return new Response(results[0].value, { headers: { "Content-Type": "application/json" } });
-        
         return new Response(JSON.stringify({ "0": "JP", "port": 7920 }), { headers: { "Content-Type": "application/json" } });
     }
 
@@ -693,29 +673,17 @@ echo "[+] 引擎更新成功！全息日志和5秒超高频机制已加载。"
             "port": parseInt(data.port) || 7920
         };
         if (data.switch_trigger) sanitizedMap.switch_trigger = data.switch_trigger;
-        
-        await env.DB.prepare(`
-            INSERT INTO global_config (key, value) VALUES ('slot_map', ?1)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        `).bind(JSON.stringify(sanitizedMap)).run();
+        await env.DB.prepare(`INSERT INTO global_config (key, value) VALUES ('slot_map', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(JSON.stringify(sanitizedMap)).run();
         return new Response("OK");
     }
 
     if (url.pathname === "/api/report" && request.method === "POST") {
       try {
         const data = await request.json();
-        await env.DB.prepare(`
-          INSERT INTO servers (ip, details, last_seen) VALUES (?1, ?2, ?3)
-          ON CONFLICT(ip) DO UPDATE SET details = excluded.details, last_seen = excluded.last_seen
-        `).bind(data.ip, JSON.stringify(data.details || []), Date.now()).run();
-        
+        await env.DB.prepare(`INSERT INTO servers (ip, details, last_seen) VALUES (?1, ?2, ?3) ON CONFLICT(ip) DO UPDATE SET details = excluded.details, last_seen = excluded.last_seen`).bind(data.ip, JSON.stringify(data.details || []), Date.now()).run();
         if (data.logs) {
-          await env.DB.prepare(`
-            INSERT INTO server_logs (ip, logs, updated_at) VALUES (?1, ?2, ?3)
-            ON CONFLICT(ip) DO UPDATE SET logs = excluded.logs, updated_at = excluded.updated_at
-          `).bind(data.ip, data.logs, Date.now()).run();
+          await env.DB.prepare(`INSERT INTO server_logs (ip, logs, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(ip) DO UPDATE SET logs = excluded.logs, updated_at = excluded.updated_at`).bind(data.ip, data.logs, Date.now()).run();
         }
-        
         return new Response("OK", { status: 200 });
       } catch (err) { return new Response("Error", { status: 500 }); }
     }
@@ -973,15 +941,11 @@ const DASHBOARD_HTML = (domain, webUser, webPass, proxyUser, proxyPass) => `
             alert('🔄 重拨指令已下发！VPS 将在8秒内心跳同步并拉黑旧 IP，请稍候...');
         }
 
-        // ==========================
-        // 渲染原生质检卡片 (一比一复刻)
-        // ==========================
         async function loadNativeIpScore(ip) {
             const container = document.getElementById('native-score-container');
             container.innerHTML = '<div class="col-span-full py-16 flex flex-col items-center justify-center text-slate-500"><svg class="animate-spin h-8 w-8 text-indigo-500 mb-4" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>穿透请求中，正在构建原生质检报告...</span></div>';
             
             try {
-                // 利用云函数反代，完美解决 CORS 和 Iframe 拦截问题
                 const res = await fetch('/api/coffee-lookup/' + encodeURIComponent(ip));
                 const d = await res.json();
                 
@@ -1068,7 +1032,6 @@ const DASHBOARD_HTML = (domain, webUser, webPass, proxyUser, proxyPass) => `
                     return;
                 }
 
-                // 渲染节点矩阵
                 tbody.innerHTML = servers.map(server => {
                     const details = JSON.parse(server.details || '[]');
                     const timeAgo = Math.floor((Date.now() - server.last_seen) / 1000);
@@ -1114,7 +1077,6 @@ const DASHBOARD_HTML = (domain, webUser, webPass, proxyUser, proxyPass) => `
                     \`;
                 }).join('');
 
-                // 核心：更新原生 IP 评分模块
                 if (servers.length > 0 && servers[0].details) {
                     const details = JSON.parse(servers[0].details);
                     if (details.length > 0 && details[0].node_ip) {
@@ -1128,7 +1090,6 @@ const DASHBOARD_HTML = (domain, webUser, webPass, proxyUser, proxyPass) => `
                     }
                 }
                 
-                // 渲染实时日志终端
                 if (servers[0] && servers[0].logs) {
                     const isAtBottom = terminal.scrollHeight - terminal.scrollTop <= terminal.clientHeight + 30;
                     
