@@ -228,7 +228,7 @@ def start_proxy_server(host: str, port: int, bind_interface: str = "tun0") -> No
     }
 
     // ====================================================
-    // [3] 动态分发：Lite Manager 调度引擎源码 (包含自定义端口)
+    // [3] 动态分发：Lite Manager 调度引擎源码
     // ====================================================
     if (url.pathname === "/scripts/lite_manager.py") {
       const MANAGER_CODE = `#!/usr/bin/env python3
@@ -295,7 +295,6 @@ def update_config_loop():
                 switch_trigger = int(data.get("switch_trigger", 0))
                 new_port = int(data.get("port", 7920))
                 
-                # 如果检测到端口变更，直接退出当前 Python 进程，让 systemd 自动重启释放资源
                 if new_port != PROXY_PORT:
                     print(f"[*] 收到端口变更指令 ({PROXY_PORT} -> {new_port})，正在重启守护进程应用新端口...", flush=True)
                     os._exit(0)
@@ -541,7 +540,6 @@ def main():
     setup_env()
     subprocess.run(["pkill", "-f", "openvpn.*tun[0-9]"], capture_output=True)
     
-    # 启动前同步一次云端配置以获取自定义端口
     try:
         req = urllib.request.Request(f"{C2_URL}/api/config", headers=get_c2_headers())
         with urllib.request.urlopen(req, timeout=10) as res:
@@ -619,24 +617,58 @@ echo "[+] 引擎更新成功！全息日志和5秒超高频机制已加载。"
     }
 
     // ====================================================
-    // [5] 开放API接口
+    // [5] 云端代理接口，破解源站 CORS 限制并拉取原生评分数据
     // ====================================================
+    if (url.pathname.startsWith("/api/coffee-lookup/")) {
+        if (!authenticate(request)) return unauthorizedResponse();
+        const targetIp = url.pathname.replace("/api/coffee-lookup/", "");
+        try {
+            const reqUrl = `https://ip.net.coffee/api/ip/lookup/${targetIp}`;
+            const resp = await fetch(reqUrl, {
+                headers: {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "application/json",
+                    "Referer": "https://ip.net.coffee/"
+                }
+            });
+            const data = await resp.text();
+            return new Response(data, { 
+                status: resp.status,
+                headers: { 
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*"
+                } 
+            });
+        } catch (err) {
+            return new Response(JSON.stringify({ error: err.message }), { status: 500 });
+        }
+    }
+
     if (url.pathname === "/api/countries") {
         try {
+            // 获取 VPNGate 数据
             const response = await fetch("https://www.vpngate.net/api/iphone/");
             const text = await response.text();
             const lines = text.split('\n');
-            const countries = new Set();
+            const dynamicCountries = new Set();
             for (let i = 2; i < lines.length; i++) {
                 const parts = lines[i].split(',');
                 if (parts.length > 6) {
                     const country = parts[6];
-                    if (country && country.length === 2 && country !== "xx" && country !== "--") countries.add(country);
+                    if (country && country.length === 2 && country !== "xx" && country !== "--") {
+                        dynamicCountries.add(country.toUpperCase());
+                    }
                 }
             }
-            return new Response(JSON.stringify(Array.from(countries)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+            
+            // 合并所有已知的国家代码
+            const predefinedCountries = ["US", "JP", "KR", "SG", "HK", "TW", "GB", "DE", "FR", "NL", "CA", "AU", "IN", "VN", "BR", "AE", "MY", "TH", "PH", "ID", "TR", "ZA", "IT", "ES", "RU", "CH", "SE", "PL", "SE", "NO", "DK", "FI", "IE", "AT", "NZ", "BE", "PT", "CZ", "GR", "HU", "RO", "BG", "HR", "SK", "SI", "LT", "LV", "EE", "EE", "UA", "RS", "BA", "SI", "CY", "MT", "IS", "LU", "IS", "CY"];
+            
+            const allCountries = new Set([...predefinedCountries, ...Array.from(dynamicCountries)]);
+            return new Response(JSON.stringify(Array.from(allCountries).sort()), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
         } catch(err) {
-            return new Response(JSON.stringify(["JP", "KR", "US", "GB", "TW"]), { headers: { "Content-Type": "application/json" } }); 
+            const fallback = ["US", "JP", "KR", "SG", "HK", "TW", "GB", "DE", "FR", "NL", "CA", "AU", "IN", "VN", "BR", "AE", "MY", "TH", "PH", "ID"];
+            return new Response(JSON.stringify(fallback), { headers: { "Content-Type": "application/json" } }); 
         }
     }
 
@@ -739,6 +771,8 @@ const DASHBOARD_HTML = (domain, webUser, webPass, proxyUser, proxyPass) => `
         ::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.5); }
         ::-webkit-scrollbar-thumb { background: rgba(51, 65, 85, 0.8); border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: rgba(71, 85, 105, 1); }
+        input[type=number]::-webkit-inner-spin-button, 
+        input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
     </style>
 </head>
 <body class="min-h-screen bg-[#090E17] text-slate-300 relative overflow-x-hidden selection:bg-indigo-500/30">
@@ -787,9 +821,9 @@ const DASHBOARD_HTML = (domain, webUser, webPass, proxyUser, proxyPass) => `
             <div class="lg:col-span-1 bg-slate-900/40 backdrop-blur-xl border border-slate-800 rounded-2xl p-6 shadow-xl shadow-black/20">
                 <div class="flex items-center gap-2 mb-4">
                     <svg class="w-5 h-5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    <h2 class="text-lg font-bold text-slate-200">可用国家流</h2>
+                    <h2 class="text-lg font-bold text-slate-200">全量国家代码库</h2>
                 </div>
-                <p class="text-xs text-slate-500 mb-4 leading-relaxed">实时监听 VPNGate 蓄水池，以下是当前网络中被捕捉到的节点所属国家代码。</p>
+                <p class="text-xs text-slate-500 mb-4 leading-relaxed">系统已合并预设代码及实时的网络探测代码，提供最全面的目标锁定选择。</p>
                 <div id="countries-list" class="flex flex-wrap gap-2 max-h-[160px] overflow-y-auto pr-1">
                     <span class="text-slate-600 text-sm animate-pulse">正在同步数据库...</span>
                 </div>
@@ -861,7 +895,26 @@ const DASHBOARD_HTML = (domain, webUser, webPass, proxyUser, proxyPass) => `
             </div>
         </div>
 
-        <div class="bg-slate-900/40 backdrop-blur-xl border border-slate-800 rounded-2xl shadow-xl overflow-hidden shadow-black/20">
+        <div id="ip-score-section" style="display: none;" class="bg-slate-900/40 backdrop-blur-xl border border-slate-800 rounded-2xl shadow-xl overflow-hidden shadow-black/20 mb-8">
+            <div class="px-6 py-4 border-b border-slate-800 bg-slate-900/50 flex justify-between items-center">
+                <h3 class="font-semibold text-slate-200 flex items-center gap-2">
+                    <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                    原生深度质检报告 (ip.net.coffee)
+                </h3>
+                <a id="ip-score-link" href="#" target="_blank" class="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors">
+                    原版页面 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+                </a>
+            </div>
+            
+            <div id="native-score-container" class="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 bg-[#090E17]">
+                <div class="col-span-full py-16 flex flex-col items-center justify-center text-slate-500">
+                    <svg class="animate-spin h-8 w-8 text-indigo-500 mb-4" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                    <span>穿透请求中，正在构建原生质检报告...</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-slate-900/40 backdrop-blur-xl border border-slate-800 rounded-2xl shadow-xl overflow-hidden shadow-black/20 pb-8">
             <div class="px-4 py-3 border-b border-slate-800 bg-slate-900/80 flex justify-between items-center">
                 <span class="text-xs text-slate-400 font-mono flex items-center gap-2">
                     <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M4 17h16a2 2 0 002-2V5a2 2 0 00-2-2H4a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
@@ -880,14 +933,14 @@ const DASHBOARD_HTML = (domain, webUser, webPass, proxyUser, proxyPass) => `
     </div>
 
     <script>
+        let currentScoreIp = "";
+
         async function fetchCountries() {
             try {
                 const res = await fetch('/api/countries');
                 const list = await res.json();
-                const requestedCountries = ["SG", "HK", "MY", "PH", "KH", "LA", "GB", "CA", "MX", "BR", "JP", "KR", "US", "TW"];
-                const combined = Array.from(new Set([...requestedCountries, ...list]));
                 const container = document.getElementById('countries-list');
-                container.innerHTML = combined.map(c => \`<span class="bg-slate-800/80 hover:bg-indigo-500/20 text-slate-300 hover:text-indigo-300 transition-colors border border-slate-700/50 px-2.5 py-1 rounded-md text-xs font-mono font-bold shadow-sm cursor-default">\${c}</span>\`).join('');
+                container.innerHTML = list.map(c => \`<span class="bg-slate-800/80 hover:bg-indigo-500/20 text-slate-300 hover:text-indigo-300 transition-colors border border-slate-700/50 px-2.5 py-1 rounded-md text-xs font-mono font-bold shadow-sm cursor-default">\${c}</span>\`).join('');
             } catch(e) {}
         }
 
@@ -918,6 +971,89 @@ const DASHBOARD_HTML = (domain, webUser, webPass, proxyUser, proxyPass) => `
                 body: JSON.stringify({ "0": val, "port": port, "switch_trigger": Date.now() })
             });
             alert('🔄 重拨指令已下发！VPS 将在8秒内心跳同步并拉黑旧 IP，请稍候...');
+        }
+
+        // ==========================
+        // 渲染原生质检卡片 (一比一复刻)
+        // ==========================
+        async function loadNativeIpScore(ip) {
+            const container = document.getElementById('native-score-container');
+            container.innerHTML = '<div class="col-span-full py-16 flex flex-col items-center justify-center text-slate-500"><svg class="animate-spin h-8 w-8 text-indigo-500 mb-4" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>穿透请求中，正在构建原生质检报告...</span></div>';
+            
+            try {
+                // 利用云函数反代，完美解决 CORS 和 Iframe 拦截问题
+                const res = await fetch('/api/coffee-lookup/' + encodeURIComponent(ip));
+                const d = await res.json();
+                
+                if (d.error && !d.cidr) {
+                    container.innerHTML = \`<div class="col-span-full text-center py-8 text-rose-400 bg-rose-500/10 rounded-xl border border-rose-500/20">无法获取报告: \${d.error}</div>\`;
+                    return;
+                }
+
+                const score = d.trust_score ?? '-';
+                const scoreColor = score >= 75 ? 'text-emerald-400 bg-emerald-500/20 border-emerald-500/30' : (score >= 45 ? 'text-amber-400 bg-amber-500/20 border-amber-500/30' : 'text-rose-400 bg-rose-500/20 border-rose-500/30');
+                
+                const cc = (d.countryCode||'').toLowerCase();
+                const regCc = (d.registered_country_code||'').toLowerCase();
+                const isNative = cc && regCc && (cc === regCc);
+                
+                let tags = '';
+                if (d.is_datacenter || d.company_type === 'hosting' || d.asn_kind === 'hosting') tags += '<span class="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/20 text-xs font-bold">机房IP</span> ';
+                else tags += '<span class="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 text-xs font-bold">家庭住宅</span> ';
+                
+                if (d.is_proxy) tags += '<span class="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/20 text-xs font-bold">Proxy</span> ';
+                if (d.is_abuser) tags += '<span class="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/20 text-xs font-bold">历史滥用</span> ';
+
+                const locStr = [d.country, d.region, d.city].filter(Boolean).join(" ");
+                const orgStr = d.company_name || d.asOrganization || '-';
+                
+                const threats = (d.intelligence?.threats || []).map(t => \`<span class="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/20 text-xs font-bold">\${t.label}</span>\`).join(' ') || '<span class="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 text-xs font-bold">纯净无异常</span>';
+
+                container.innerHTML = \`
+                    <div class="col-span-full bg-slate-800/60 border border-slate-700/80 p-5 rounded-2xl flex flex-wrap gap-4 justify-between items-center mb-2 shadow-lg">
+                        <div class="flex items-center gap-4">
+                            <span class="text-3xl font-extrabold font-mono text-white tracking-tight drop-shadow-sm">\${ip}</span>
+                            <span class="text-slate-400 text-sm hidden sm:flex items-center border-l border-slate-700 pl-4 h-6">
+                                <span class="uppercase tracking-widest text-indigo-400 mr-2 text-xs font-bold">\${d.countryCode || 'N/A'}</span> 
+                                \${locStr} · \${orgStr}
+                            </span>
+                        </div>
+                        <div class="flex items-center gap-3 px-5 py-2 rounded-xl border \${scoreColor} shadow-inner">
+                            <span class="text-sm uppercase font-extrabold opacity-90 tracking-wider">IP 评分</span>
+                            <span class="text-3xl font-black font-mono">\${score}</span>
+                        </div>
+                    </div>
+
+                    <div class="bg-slate-800/40 border border-slate-700/60 p-6 rounded-2xl flex flex-col gap-4 shadow-sm hover:shadow-md transition-shadow hover:bg-slate-800/60">
+                        <h4 class="text-xs font-bold text-slate-500 uppercase tracking-widest pb-3 border-b border-slate-700/50">使用场景 / 类型</h4>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">IP 原生性</span> <span class="font-medium text-sm">\${isNative ? '<span class="px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-xs font-bold">原生 IP</span>' : '<span class="px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30 text-xs font-bold">广播 IP ('+(d.registered_country_code||'').toUpperCase()+')</span>'}</span></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">标记</span> <div class="flex gap-1">\${tags}</div></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">运营类型</span> <span class="font-medium text-slate-200 text-sm capitalize">\${d.company_type || '-'}</span></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">人机流量</span> <span class="font-medium text-xs px-2.5 py-1 rounded-full border \${d.is_datacenter ? 'text-amber-400 bg-amber-500/10 border-amber-500/20' : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'}">\${d.is_datacenter ? '🤖 机器偏多' : '👤 人类偏多'}</span></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">归属机构</span> <span class="font-medium text-slate-300 text-sm truncate max-w-[150px]" title="\${orgStr}">\${orgStr}</span></div>
+                    </div>
+
+                    <div class="bg-slate-800/40 border border-slate-700/60 p-6 rounded-2xl flex flex-col gap-4 shadow-sm hover:shadow-md transition-shadow hover:bg-slate-800/60">
+                        <h4 class="text-xs font-bold text-slate-500 uppercase tracking-widest pb-3 border-b border-slate-700/50">ASN / 运营商</h4>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">ASN</span> <span class="font-medium text-indigo-300 text-sm font-mono">AS\${d.asn || '-'}</span></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">CIDR</span> <span class="font-medium text-slate-300 text-sm font-mono">\${d.cidr || '-'}</span></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">自报类型</span> <span class="font-medium \${d.asn_kind === 'residential' ? 'text-emerald-400' : 'text-slate-200'} text-sm capitalize">\${d.asn_kind || '-'}</span></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">IP 范围</span> <span class="font-medium text-slate-400 text-xs font-mono">\${d.range?.first || '-'} - \${d.range?.last || ''}</span></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">分配日期</span> <span class="font-medium text-slate-400 text-xs font-mono">\${d.asn_allocated || '-'}</span></div>
+                    </div>
+
+                    <div class="bg-slate-800/40 border border-slate-700/60 p-6 rounded-2xl flex flex-col gap-4 shadow-sm hover:shadow-md transition-shadow hover:bg-slate-800/60">
+                        <h4 class="text-xs font-bold text-slate-500 uppercase tracking-widest pb-3 border-b border-slate-700/50">风险深度检测</h4>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">VPN / 代理</span> <span class="\${(d.is_vpn || d.is_proxy) ? 'px-2.5 py-1 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-bold' : 'px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-xs font-bold'}">\${(d.is_vpn || d.is_proxy) ? '已检测到' : '未检测到'}</span></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">Tor 节点</span> <span class="\${d.is_tor ? 'px-2.5 py-1 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-bold' : 'px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-xs font-bold'}">\${d.is_tor ? '已检测到' : '未检测到'}</span></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">威胁情报</span> <div class="flex gap-1">\${threats}</div></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">Bogon (广播)</span> <span class="font-medium text-xs font-bold \${d.is_bogon ? 'text-rose-400' : 'text-emerald-400'}">\${d.is_bogon ? '是' : '否 (公网可达)'}</span></div>
+                        <div class="flex justify-between items-center"><span class="text-slate-400 text-sm">反向 DNS</span> <span class="font-medium text-slate-400 text-xs font-mono truncate max-w-[150px]" title="\${d.rdns || '-'}">\${d.rdns || '-'}</span></div>
+                    </div>
+                \`;
+            } catch (e) {
+                container.innerHTML = \`<div class="col-span-full text-center py-10 text-rose-400 bg-rose-500/10 rounded-xl border border-rose-500/20">渲染失败: \${e.message}</div>\`;
+            }
         }
 
         async function fetchNodes() {
@@ -977,6 +1113,20 @@ const DASHBOARD_HTML = (domain, webUser, webPass, proxyUser, proxyPass) => `
                         </tr>
                     \`;
                 }).join('');
+
+                // 核心：更新原生 IP 评分模块
+                if (servers.length > 0 && servers[0].details) {
+                    const details = JSON.parse(servers[0].details);
+                    if (details.length > 0 && details[0].node_ip) {
+                        const newIp = details[0].node_ip;
+                        if (newIp !== currentScoreIp) {
+                            currentScoreIp = newIp;
+                            document.getElementById('ip-score-section').style.display = 'block';
+                            document.getElementById('ip-score-link').href = \`https://ip.net.coffee/ip/\${newIp}\`;
+                            loadNativeIpScore(newIp);
+                        }
+                    }
+                }
                 
                 // 渲染实时日志终端
                 if (servers[0] && servers[0].logs) {
