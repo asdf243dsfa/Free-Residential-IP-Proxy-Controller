@@ -431,17 +431,21 @@ def connect_node(tun: Tunnel, node: dict):
             setup_routing(tun.name, tun.table_id)
             time.sleep(1) 
             
+            # --- 修复核心逻辑：直接调用 JSON API 端点，精准匹配字段防误判 ---
             is_residential = True
             try:
-                req_url = f"https://ip.net.coffee/ip/{node['ip']}"
-                check_req = urllib.request.Request(req_url, headers={"User-Agent": "Mozilla/5.0"}, method="GET")
+                req_url = f"https://ip.net.coffee/api/ip/lookup/{node['ip']}"
+                check_req = urllib.request.Request(req_url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, method="GET")
                 with urllib.request.urlopen(check_req, timeout=10) as check_res:
-                    api_resp = check_res.read().decode("utf-8").lower()
-                    clean_resp = api_resp.replace(" ", "").replace("\\n", "").replace("\\r", "")
-                    if "hosting" in api_resp or "datacenter" in api_resp or "机房" in api_resp or "data center" in api_resp:
-                        if '"hosting":false' not in clean_resp and '"datacenter":false' not in clean_resp:
-                            is_residential = False
+                    data = json.loads(check_res.read().decode("utf-8"))
+                    is_dc = data.get("is_datacenter", False)
+                    company_type = str(data.get("company_type", "")).lower()
+                    asn_kind = str(data.get("asn_kind", "")).lower()
+                    
+                    if is_dc or company_type == "hosting" or asn_kind == "hosting":
+                        is_residential = False
             except Exception as e: pass
+            # -----------------------------------------------------------
             
             if not is_residential:
                 print(f"[-] {tun.name} 节点检测为机房 IP，残忍抛弃: {node['ip']}", flush=True)
