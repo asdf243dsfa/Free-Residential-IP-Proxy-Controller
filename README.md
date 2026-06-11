@@ -10,7 +10,7 @@
 
 KUI面板正在集成融合免费免费住宅IP代理调度系统 https://github.com/a6216abcd/K-UI
 
-老用户覆盖代码，记得重新去vps运行agent命令，长时间获取不到IP，记得装一下warp ipv4
+老用户覆盖代码，记得重新去vps运行agent命令，长时间获取不到IP，记得装一下warp ipv4,安装warp ipv4后，导出的IP会变warp ipv4需要手动修改成本机真实IP
 
 ```bash
 wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh
